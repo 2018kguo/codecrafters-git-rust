@@ -3,11 +3,13 @@ use flate2::write::ZlibEncoder;
 use flate2::Compression;
 use sha1::{Digest, Sha1};
 
+use chrono::{DateTime, Local};
 #[allow(unused_imports)]
 use std::env;
 #[allow(unused_imports)]
 use std::fs;
 use std::io::prelude::*;
+use std::time;
 
 pub trait GitObject {
     // Method to serialize the object. This must be implemented by any struct implementing the trait.
@@ -150,6 +152,24 @@ impl GitObject for GitTree {
     }
 }
 
+pub struct GitCommit {
+    pub commit_data: String
+} 
+
+impl GitObject for GitCommit {
+    fn fmt(&self) -> &[u8] {
+        b"commit"
+    }
+
+    fn serialize(&self) -> Vec<u8> {
+        self.commit_data.clone().as_bytes().to_vec()
+    }
+
+    fn deserialize(&mut self, data: &[u8]) {
+        self.commit_data = String::from_utf8(data.to_vec()).unwrap();
+    }
+}
+
 fn main() {
     let args: Vec<String> = env::args().collect();
     match args[1].as_str() {
@@ -193,6 +213,16 @@ fn main() {
         "write-tree" => {
             let tree_hash = write_tree(".");
             println!("{}", tree_hash);
+        }
+        "commit-tree" => {
+            let parent_hash_index = args.iter().position(|x| x == "-p").unwrap();
+            let parent_hash = &args[parent_hash_index + 1];
+            let message_index = args.iter().position(|x| x == "-m").unwrap();
+            let message = &args[message_index + 1];
+            let commit_tree_index = args.iter().position(|x| x == "commit-tree").unwrap();
+            let tree_hash = &args[commit_tree_index + 1];
+            let commit_hash = commit(tree_hash, message, parent_hash);
+            println!("{}", commit_hash);
         }
         _ => {
             println!("unknown command: {}", args[1])
@@ -300,4 +330,63 @@ fn write_tree(path: &str) -> String {
     };
     let tree_ser = tree.serialize();
     write_object(tree_ser.as_slice(), tree.fmt())
+}
+
+fn commit(tree_hash: &str, message: &str, parent_hash: &str) -> String {
+    // creates a commit object with the current tree and the given message
+    // returns the sha1 hash of the commit object
+    //
+    // tree 22264ec0ce9da29d0c420e46627fa0cf057e709a
+    // parent 03f882ade69ad898aba73664740641d909883cdc
+    // author Ben Hoyt <benhoyt@gmail.com> 1493170892 -0500
+    // committer Ben Hoyt <benhoyt@gmail.com> 1493170892 -0500
+    //
+    // Fix cat-file size/type/pretty handling\n
+    //
+    let hardcoded_author_name = "Kevin Guo";
+    let hardcoded_author_email = "kev.guo123@gmail.com";
+
+    // get the current epoch time in seconds
+    let timestamp = time::SystemTime::now()
+        .duration_since(time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+
+    let now: DateTime<Local> = Local::now();
+
+    // Get the UTC offset in hours and minutes
+    let offset = now.offset();
+    let offset_hours = offset.local_minus_utc() / 3600;
+    let offset_minutes = (offset.local_minus_utc() % 3600) / 60;
+
+    // Format the offset as +HHMM or -HHMM
+    let offset = format!("{:+03}{:02}", offset_hours, offset_minutes);
+    // get the offset from UTC, formatted as -0500 or +0000
+    let author_contents = format!(
+        "{} <{}> {} {}",
+        hardcoded_author_name, hardcoded_author_email, timestamp, offset
+    );
+
+    let author_line = format!("author {}", author_contents);
+    let parent_line = format!("parent {}", parent_hash);
+    let committer_line = format!("committer {}", author_contents);
+
+    let tree_line = format!("tree {}", tree_hash);
+
+    let commit_lines = vec![
+        tree_line,
+        parent_line,
+        author_line,
+        committer_line,
+        "".to_string(),
+        message.to_string(),
+        "".to_string(),
+    ];
+    let commit_contents = commit_lines.join("\n");
+
+    let commit = GitCommit {
+        commit_data: commit_contents,
+    };
+    let commit_contents = commit.serialize();
+    write_object(commit_contents.as_slice(), commit.fmt())
 }
