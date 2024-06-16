@@ -129,7 +129,13 @@ impl GitObject for GitTree {
 
         let mut result = Vec::new();
         for leaf in &sorted_leaves {
-            result.extend_from_slice(&leaf.mode);
+            // trim the leading null byte from the mode if it's there
+            let mode = if leaf.mode.starts_with(b"0") {
+                &leaf.mode[1..]
+            } else {
+                &leaf.mode
+            };
+            result.extend_from_slice(&mode);
             result.push(b' ');
             result.extend_from_slice(leaf.path.as_bytes());
             result.push(b'\0');
@@ -163,7 +169,7 @@ fn main() {
                     std::io::stdout().flush().unwrap();
                 }
                 _ => {
-                    println!("unexpected object type for cat-file"); 
+                    println!("unexpected object type for cat-file");
                 }
             }
         }
@@ -171,7 +177,9 @@ fn main() {
             let file_path = &args[args.len() - 1];
             let data = fs::read(file_path).unwrap();
             let object = GitBlob { blob_data: data };
-            let hash = write_object(object);
+            let contents = object.serialize();
+            let object_type = object.fmt();
+            let hash = write_object(contents.as_slice(), object_type);
             println!("{}", hash);
         }
         "ls-tree" => {
@@ -181,6 +189,10 @@ fn main() {
                 GitObjectType::Tree(tree) => ls_tree(tree),
                 _ => println!("not a tree object"),
             }
+        }
+        "write-tree" => {
+            let tree_hash = write_tree(".");
+            println!("{}", tree_hash);
         }
         _ => {
             println!("unknown command: {}", args[1])
@@ -201,28 +213,30 @@ fn read_object(hash: &str) -> GitObjectType {
 
     match object_type {
         b"blob" => {
-            let mut blob = GitBlob { blob_data: Vec::new() };
+            let mut blob = GitBlob {
+                blob_data: Vec::new(),
+            };
             blob.deserialize(byte_contents);
             GitObjectType::Blob(blob)
-        },
+        }
         b"tree" => {
             let mut tree = GitTree { leaves: Vec::new() };
             tree.deserialize(byte_contents);
             GitObjectType::Tree(tree)
-        },
+        }
         _ => panic!("unknown object type"),
     }
 }
 
-fn write_object(object: impl GitObject) -> String {
+fn write_object(contents: &[u8], object_type: &[u8]) -> String {
     // returns the sha1 hash of the object
-    let serialized = object.serialize();
+    let serialized = contents;
     let mut result = Vec::new();
-    result.extend_from_slice(object.fmt());
+    result.extend_from_slice(object_type);
     result.push(b' ');
     result.extend_from_slice(serialized.len().to_string().as_bytes());
     result.push(b'\0');
-    result.extend_from_slice(&serialized);
+    result.extend_from_slice(serialized);
     let mut hasher = Sha1::new();
     hasher.update(&result);
     let hash_result = hasher.finalize();
@@ -240,4 +254,50 @@ fn ls_tree(tree: GitTree) {
     for leaf in tree.leaves {
         println!("{}", leaf.path);
     }
+}
+
+fn write_tree(path: &str) -> String {
+    // creates a tree object from the current working directory and saves tree files recursively
+    // returns the sha1 hash of the tree object
+    //
+    // mode, path, sha1 hash
+    let mut entries: Vec<(Vec<u8>, String, String)> = Vec::new();
+    for entry in fs::read_dir(path).unwrap() {
+        let entry = entry.unwrap();
+        let metadata = entry.metadata().unwrap();
+        let mode = if metadata.is_dir() {
+            b"040000".to_vec()
+        } else {
+            b"100644".to_vec()
+        };
+        let file_name = entry.file_name().into_string().unwrap();
+        let entry_path = entry.path();
+        if file_name == ".git" {
+            continue;
+        }
+        if metadata.is_dir() {
+            let tree_sha_hash = write_tree(entry_path.to_str().unwrap());
+            entries.push((mode, file_name, tree_sha_hash));
+        } else {
+            let blob_contents = fs::read(entry_path.clone()).unwrap();
+            let blob = GitBlob {
+                blob_data: blob_contents,
+            };
+            let blob_contents = blob.serialize();
+            let sha_hash = write_object(blob_contents.as_slice(), blob.fmt());
+            entries.push((mode, file_name, sha_hash));
+        }
+    }
+    let tree = GitTree {
+        leaves: entries
+            .iter()
+            .map(|(mode, entry_path, sha_hash)| GitTreeLeaf {
+                mode: mode.clone(),
+                path: entry_path.clone(),
+                sha_hash: sha_hash.clone(),
+            })
+            .collect(),
+    };
+    let tree_ser = tree.serialize();
+    write_object(tree_ser.as_slice(), tree.fmt())
 }
