@@ -135,7 +135,7 @@ impl GitObject for GitTree {
             } else {
                 &leaf.mode
             };
-            result.extend_from_slice(&mode);
+            result.extend_from_slice(mode);
             result.push(b' ');
             result.extend_from_slice(leaf.path.as_bytes());
             result.push(b'\0');
